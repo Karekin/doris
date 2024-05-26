@@ -1,17 +1,17 @@
 // Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
+// or more contributor license agreements. See the NOTICE file
 // distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
+// regarding copyright ownership. The ASF licenses this file
 // to you under the Apache License, Version 2.0 (the
 // "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// with the License. You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
 // "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
+// KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations
 // under the License.
 
@@ -34,9 +34,13 @@ import java.util.stream.Collectors;
 
 public class PlanTreeBuilder {
 
+    // 用于存储计划片段的列表
     private List<PlanFragment> fragments;
+    // 计划树的根节点
     private PlanTreeNode treeRoot;
+    // 用于存储接收节点的列表
     private List<PlanTreeNode> sinkNodes = Lists.newArrayList();
+    // 用于存储交换节点的列表
     private List<PlanTreeNode> exchangeNodes = Lists.newArrayList();
 
     public PlanTreeBuilder(List<PlanFragment> fragments) {
@@ -47,11 +51,13 @@ public class PlanTreeBuilder {
         return treeRoot;
     }
 
+    // 构建计划树
     public void build() throws UserException {
         buildFragmentPlans();
         assembleFragmentPlans();
     }
 
+    // 构建片段计划
     private void buildFragmentPlans() {
         int i = 0;
         for (PlanFragment fragment : fragments) {
@@ -61,7 +67,7 @@ public class PlanTreeBuilder {
                 StringBuilder sb = new StringBuilder();
                 if (sink.getExchNodeId() != null) {
                     sb.append("[").append(sink.getExchNodeId().asInt()).append(": ")
-                            .append(sink.getClass().getSimpleName()).append("]");
+                        .append(sink.getClass().getSimpleName()).append("]");
                 } else {
                     sb.append("[").append(sink.getClass().getSimpleName()).append("]");
                 }
@@ -70,7 +76,7 @@ public class PlanTreeBuilder {
                 List<PlanNodeId> exchangeIds;
                 if (sink instanceof MultiCastDataSink) {
                     exchangeIds = ((MultiCastDataSink) sink).getDataStreamSinks().stream()
-                            .map(s -> s.getExchNodeId()).collect(Collectors.toList());
+                        .map(s -> s.getExchNodeId()).collect(Collectors.toList());
                 } else if (sink.getExchNodeId() != null) {
                     exchangeIds = ImmutableList.of(sink.getExchNodeId());
                 } else {
@@ -78,7 +84,7 @@ public class PlanTreeBuilder {
                 }
                 sinkNode = new PlanTreeNode(exchangeIds, sb.toString());
                 if (i == 0) {
-                    // sink of first fragment, set it as tree root
+                    // 第一个片段的接收节点，设置为树根
                     treeRoot = sinkNode;
                 } else {
                     sinkNodes.add(sinkNode);
@@ -93,10 +99,11 @@ public class PlanTreeBuilder {
         }
     }
 
+    // 组装片段计划
     private void assembleFragmentPlans() throws UserException {
         for (PlanTreeNode sender : sinkNodes) {
             if (sender == treeRoot) {
-                // This is the result sink, skip it
+                // 这是结果接收器，跳过
                 continue;
             }
             List<PlanNodeId> senderIds = sender.getIds();
@@ -110,6 +117,7 @@ public class PlanTreeBuilder {
         }
     }
 
+    // 查找交换节点
     private PlanTreeNode findExchangeNode(PlanNodeId senderId) {
         for (PlanTreeNode exchangeNode : exchangeNodes) {
             if (exchangeNode.getIds().stream().anyMatch(senderId::equals)) {
@@ -119,6 +127,7 @@ public class PlanTreeBuilder {
         return null;
     }
 
+    // 为计划节点构建计划树节点
     private void buildForPlanNode(PlanNode planNode, PlanTreeNode parent) {
         PlanTreeNode node = new PlanTreeNode(ImmutableList.of(planNode.getId()), planNode.getPlanTreeExplainStr());
 
@@ -129,8 +138,7 @@ public class PlanTreeBuilder {
         if (planNode.getPlanNodeName().contains(ExchangeNode.EXCHANGE_NODE)) {
             exchangeNodes.add(node);
         } else {
-            // Do not traverse children of exchange node,
-            // They will be visited in other fragments.
+            // 不遍历交换节点的子节点，它们将在其他片段中访问
             for (PlanNode child : planNode.getChildren()) {
                 buildForPlanNode(child, node);
             }

@@ -1,17 +1,17 @@
 // Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
+// or more contributor license agreements. See the NOTICE file
 // distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
+// regarding copyright ownership. The ASF licenses this file
 // to you under the Apache License, Version 2.0 (the
 // "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// with the License. You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
 // "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
+// KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations
 // under the License.
 // This file is copied from
@@ -47,112 +47,90 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * PlanFragments form a tree structure via their ExchangeNodes. A tree of fragments
- * connected in that way forms a plan. The output of a plan is produced by the root
- * fragment and is either the result of the query or an intermediate result
- * needed by a different plan (such as a hash table).
+ * PlanFragments通过其ExchangeNodes形成树结构。这样连接的片段树形成一个计划。
+ * 计划的输出由根片段生成，是查询结果或另一个计划所需的中间结果（如哈希表）。
  *
- * Plans are grouped into cohorts based on the consumer of their output: all
- * plans that materialize intermediate results for a particular consumer plan
- * are grouped into a single cohort.
+ * 计划根据其输出的使用者进行分组：所有为特定使用者计划物化中间结果的计划都被分组到一个单独的组中。
  *
- * A PlanFragment encapsulates the specific tree of execution nodes that
- * are used to produce the output of the plan fragment, as well as output exprs,
- * destination node, etc. If there are no output exprs, the full row that is
- * produced by the plan root is marked as materialized.
+ * PlanFragment封装了用于生成计划片段输出的具体执行节点树，以及输出表达式、目标节点等。
+ * 如果没有输出表达式，则标记由计划根节点生成的整个行被物化。
  *
- * A plan fragment can have one or many instances, each of which in turn is executed by
- * an individual node and the output sent to a specific instance of the destination
- * fragment (or, in the case of the root fragment, is materialized in some form).
+ * 一个计划片段可以有一个或多个实例，每个实例由单个节点执行，输出发送到目标片段的特定实例（或在根片段的情况下以某种形式物化）。
  *
- * A hash-partitioned plan fragment is the result of one or more hash-partitioning data
- * streams being received by plan nodes in this fragment. In the future, a fragment's
- * data partition could also be hash partitioned based on a scan node that is reading
- * from a physically hash-partitioned table.
+ * 一个哈希分区的计划片段是一个或多个哈希分区数据流被该片段中的计划节点接收的结果。
+ * 将来，片段的数据分区也可以基于从物理哈希分区表读取的扫描节点进行哈希分区。
  *
- * The sequence of calls is:
- * - c'tor
- * - assemble with getters, etc.
+ * 调用顺序是：
+ * - 构造函数
+ * - 使用getter等方法进行组装
  * - finalize()
  * - toThrift()
  *
- * TODO: the tree of PlanNodes is connected across fragment boundaries, which makes
- *   it impossible search for things within a fragment (using TreeNode functions);
- *   fix that
+ * TODO: PlanNodes的树在片段边界上连接，这使得无法在片段内搜索内容（使用TreeNode函数）；需要修复这一点
  */
 public class PlanFragment extends TreeNode<PlanFragment> {
     private static final Logger LOG = LogManager.getLogger(PlanFragment.class);
 
-    // id for this plan fragment
+    // 此计划片段的ID
     private PlanFragmentId fragmentId;
-    // nereids planner and original planner generate fragments in different order.
-    // This makes nereids fragment id different from that of original planner, and
-    // hence different from that in profile.
-    // in original planner, fragmentSequenceNum is fragmentId, and in nereids planner,
-    // fragmentSequenceNum is the id displayed in profile
+    // nereids规划器和原始规划器以不同的顺序生成片段。
+    // 这使得nereids片段ID与原始规划器不同，因此与配置文件中的ID不同。
+    // 在原始规划器中，fragmentSequenceNum是fragmentId，而在nereids规划器中，
+    // fragmentSequenceNum是配置文件中显示的ID
     private int fragmentSequenceNum;
     // private PlanId planId_;
     // private CohortId cohortId_;
 
-    // root of plan tree executed by this fragment
+    // 此片段执行的计划树的根节点
     private PlanNode planRoot;
 
-    // exchange node to which this fragment sends its output
+    // 此片段将其输出发送到的交换节点
     private ExchangeNode destNode;
 
-    // if null, outputs the entire row produced by planRoot
+    // 如果为null，则输出计划根节点生成的整个行
     private ArrayList<Expr> outputExprs;
 
-    // created in finalize() or set in setSink()
+    // 在finalize()中创建或在setSink()中设置
     protected DataSink sink;
 
-    // data source(or sender) of specific partition in the fragment;
-    // an UNPARTITIONED fragment is executed on only a single node
+    // 此片段中特定分区的数据源（或发送方）；一个未分区的片段仅在单个节点上执行
     private DataPartition dataPartition;
 
-    // specification of the actually input partition of this fragment when transmitting to be.
-    // By default, the value of the data partition in planner and the data partition transmitted to be are the same.
-    // So this attribute is empty.
-    // But sometimes the planned value and the serialized value are inconsistent. You need to set this value.
-    // At present, this situation only occurs in the fragment where the scan node is located.
-    // Since the data partition expression of the scan node is actually constructed from the schema of the table,
-    //   the expression is not analyzed.
-    // This will cause this expression to not be serialized correctly and transmitted to be.
-    // In this case, you need to set this attribute to DataPartition RANDOM to avoid the problem.
+    // 传输到BE时实际输入分区的规范。
+    // 默认情况下，规划器中的数据分区值和传输到BE的分区值相同。因此此属性为空。
+    // 但有时计划值和序列化值不一致，需要设置此值。
+    // 目前，这种情况仅发生在包含扫描节点的片段中。
+    // 由于扫描节点的数据分区表达式实际上是根据表的模式构建的，因此表达式未进行分析。
+    // 这将导致此表达式无法正确序列化和传输到BE。
+    // 在这种情况下，需要将此属性设置为DataPartition RANDOM以避免问题。
     private DataPartition dataPartitionForThrift;
 
-    // specification of how the output of this fragment is partitioned (i.e., how
-    // it's sent to its destination);
-    // if the output is UNPARTITIONED, it is being broadcast
+    // 此片段输出的分区规范（即，它如何发送到目标）；如果输出是未分区的，则正在广播
     protected DataPartition outputPartition;
 
-    // Whether query statistics is sent with every batch. In order to get the query
-    // statistics correctly when query contains limit, it is necessary to send query
-    // statistics with every batch, or only in close.
+    // 查询统计信息是否与每个批次一起发送。为了在查询包含限制时正确获取查询统计信息，有必要与每个批次一起发送查询统计信息，或仅在关闭时发送。
     private boolean transferQueryStatisticsWithEveryBatch;
 
     // TODO: SubstitutionMap outputSmap;
-    // substitution map to remap exprs onto the output of this fragment, to be applied
-    // at destination fragment
+    // 替换映射，用于将表达式重新映射到此片段的输出，在目标片段应用
 
-    // specification of the number of parallel when fragment is executed
-    // default value is 1
+    // 片段执行时的并行数量规范，默认值为1
     private int parallelExecNum = 1;
 
-    // The runtime filter id that produced
+    // 生成的运行时过滤器ID
     private Set<RuntimeFilterId> builderRuntimeFilterIds;
-    // The runtime filter id that is expected to be used
+    // 预期使用的运行时过滤器ID
     private Set<RuntimeFilterId> targetRuntimeFilterIds;
 
     private int bucketNum;
 
-    // has colocate plan node
+    // 是否有共置计划节点
     protected boolean hasColocatePlanNode = false;
 
     private TResultSinkType resultSinkType = TResultSinkType.MYSQL_PROTOCAL;
 
     /**
-     * C'tor for fragment with specific partition; the output is by default broadcast.
+     * 带特定分区的片段的构造函数；默认情况下，输出为广播。
      */
     public PlanFragment(PlanFragmentId id, PlanNode root, DataPartition partition) {
         this.fragmentId = id;
@@ -172,16 +150,15 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     }
 
     public PlanFragment(PlanFragmentId id, PlanNode root, DataPartition partition,
-            Set<RuntimeFilterId> builderRuntimeFilterIds, Set<RuntimeFilterId> targetRuntimeFilterIds) {
+                        Set<RuntimeFilterId> builderRuntimeFilterIds, Set<RuntimeFilterId> targetRuntimeFilterIds) {
         this(id, root, partition);
         this.builderRuntimeFilterIds = new HashSet<>(builderRuntimeFilterIds);
         this.targetRuntimeFilterIds = new HashSet<>(targetRuntimeFilterIds);
     }
 
     /**
-     * Assigns 'this' as fragment of all PlanNodes in the plan tree rooted at node.
-     * Does not traverse the children of ExchangeNodes because those must belong to a
-     * different fragment.
+     * 将“this”分配为以node为根的计划树中所有PlanNode的片段。
+     * 不遍历ExchangeNode的子节点，因为这些子节点必须属于不同的片段。
      */
     public void setFragmentInPlanTree(PlanNode node) {
         if (node == null) {
@@ -197,8 +174,8 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     }
 
     /**
-     * Assign ParallelExecNum by PARALLEL_FRAGMENT_EXEC_INSTANCE_NUM in SessionVariable for synchronous request
-     * Assign ParallelExecNum by default value for Asynchronous request
+     * 根据SessionVariable中的PARALLEL_FRAGMENT_EXEC_INSTANCE_NUM分配ParallelExecNum用于同步请求
+     * 对于异步请求，默认值分配ParallelExecNum
      */
     public void setParallelExecNumIfExists() {
         if (ConnectContext.get() != null) {
@@ -206,8 +183,8 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         }
     }
 
-    // Manually set parallel exec number
-    // Currently for broker load
+    // 手动设置并行执行数量
+    // 目前用于代理加载
     public void setParallelExecNum(int parallelExecNum) {
         this.parallelExecNum = parallelExecNum;
     }
@@ -253,7 +230,7 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     }
 
     /**
-     * Finalize plan tree and create stream sink, if needed.
+     * 完成计划树并创建流接收器（如果需要）。
      */
     public void finalize(StatementBase stmtBase) {
         if (sink != null) {
@@ -261,14 +238,14 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         }
         if (destNode != null) {
             Preconditions.checkState(sink == null);
-            // we're streaming to an exchange node
+            // 我们正在向交换节点流式传输
             DataStreamSink streamSink = new DataStreamSink(destNode.getId());
             streamSink.setOutputPartition(outputPartition);
             streamSink.setFragment(this);
             sink = streamSink;
         } else {
             if (planRoot == null) {
-                // only output expr, no FROM clause
+                // 仅输出表达式，没有FROM子句
                 // "select 1 + 2"
                 return;
             }
@@ -277,16 +254,16 @@ public class PlanFragment extends TreeNode<PlanFragment> {
             if (queryStmt != null && queryStmt.hasOutFileClause()) {
                 sink = new ResultFileSink(planRoot.getId(), queryStmt.getOutFileClause(), queryStmt.getColLabels());
             } else {
-                // add ResultSink
-                // we're streaming to an result sink
+                // 添加ResultSink
+                // 我们正在向结果接收器流式传输
                 sink = new ResultSink(planRoot.getId(), resultSinkType);
             }
         }
     }
 
     /**
-     * Return the number of nodes on which the plan fragment will execute.
-     * invalid: -1
+     * 返回计划片段将执行的节点数量。
+     * 无效：-1
      */
     public int getNumNodes() {
         return dataPartition == DataPartition.UNPARTITIONED ? 1 : planRoot.getNumNodes();
@@ -313,7 +290,7 @@ public class PlanFragment extends TreeNode<PlanFragment> {
             result.setPartition(dataPartitionForThrift.toThrift());
         }
 
-        // TODO chenhao , calculated by cost
+        // TODO chenhao , 根据成本计算
         result.setMinReservationBytes(0);
         result.setInitialReservationTotalClaims(0);
         return result;
@@ -347,7 +324,7 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     }
 
     /**
-     * Returns true if this fragment is partitioned.
+     * 如果此片段是分区的，则返回true。
      */
     public boolean isPartitioned() {
         return (dataPartition.getType() != TPartitionType.UNPARTITIONED);
@@ -400,8 +377,7 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     }
 
     /**
-     * Adds a node as the new root to the plan tree. Connects the existing
-     * root as the child of newRoot.
+     * 将一个节点添加为计划树的新根节点。将现有的根节点连接为newRoot的子节点。
      */
     public void addPlanRoot(PlanNode newRoot) {
         Preconditions.checkState(newRoot.getChildren().size() == 1);

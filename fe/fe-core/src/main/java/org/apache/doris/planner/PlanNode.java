@@ -62,109 +62,124 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Each PlanNode represents a single relational operator
- * and encapsulates the information needed by the planner to
- * make optimization decisions.
- * <p/>
- * finalize(): Computes internal state, such as keys for scan nodes; gets called once on
- * the root of the plan tree before the call to toThrift(). Also finalizes the set
- * of conjuncts, such that each remaining one requires all of its referenced slots to
- * be materialized (ie, can be evaluated by calling GetValue(), rather than being
- * implicitly evaluated as part of a scan key).
- * <p/>
- * conjuncts: Each node has a list of conjuncts that can be executed in the context of
- * this node, ie, they only reference tuples materialized by this node or one of
- * its children (= are bound by tupleIds).
+ * 每个PlanNode表示一个单独的关系运算符，并封装了规划器在进行优化决策时所需的信息。
+
+ * finalize(): 计算内部状态，如扫描节点的键；在调用toThrift()之前，根计划树上的此方法只调用一次。
+ * 还会完成连接子集的设置，使得每个剩余的连接子集都需要它所引用的所有插槽物化（即可以通过调用GetValue()来评估，
+ * 而不是作为扫描键的一部分隐式评估）。
+
+ * conjuncts: 每个节点都有一个连接子集列表，这些子集可以在该节点的上下文中执行，即，它们仅引用由该节点或其子节点物化的元组（=受元组ID绑定）。
  */
 public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
 
-    protected String planNodeName;
+    protected String planNodeName; // 计划节点的名称
 
-    protected PlanNodeId id;  // unique w/in plan tree; assigned by planner
-    protected PlanFragmentId fragmentId;  // assigned by planner after fragmentation step
-    protected long limit; // max. # of rows to be returned; 0: no limit
-    protected long offset;
+    protected PlanNodeId id;  // 在计划树中唯一，由规划器分配
+    protected PlanFragmentId fragmentId;  // 在分段步骤后由规划器分配
+    protected long limit; // 返回的最大行数；0表示无限制
+    protected long offset; // 偏移量
 
-    // ids materialized by the tree rooted at this node
+    /*
+     * tupleIds 字段表示在当前计划节点（PlanNode）所对应的计划树中，被物化（materialized）的元组（Tuple）的ID列表。
+     * 换句话说，这个列表包含了该节点及其子节点在执行过程中实际生成和使用的元组ID，这些元组是查询执行过程中需要被具体化并存储的。
+     * 可以形象地将 TupleId 看作是每个数据行（Row）的身份证号，用于标识和引用查询过程中生成或处理的具体数据行。
+     */
     protected ArrayList<TupleId> tupleIds;
 
-    // ids of the TblRefs "materialized" by this node; identical with tupleIds_
-    // if the tree rooted at this node only materializes BaseTblRefs;
-    // useful during plan generation
+    /*
+     * `tblRefIds` 字段表示在当前计划节点中被“物化”的表引用（Table References）的ID列表；
+     * 如果当前节点及其子节点的计划树仅“物化”基本表引用（BaseTblRefs），则这个列表与 `tupleIds` 相同；这个字段在生成查询执行计划时非常有用。
+
+     * tblRefIds 字段表示当前计划节点及其子节点所涉及到的表引用的ID列表。如果这个计划节点只涉及到基本表（例如物理存在的数据库表），
+     * 那么这个字段与 tupleIds 是相同的。如果计划节点涉及到的是其他类型的表引用（例如视图、派生表或临时表），那么这个字段将包含这些特殊表引用的ID。
+
+     * 两者的区别在于：
+     * 1. 基本表（BaseTblRefs）：这是数据库中实际存在的物理表，直接存储数据。
+     *    计划节点涉及到基本表时， tblRefIds 和 tupleIds 是相同的，因为所有元组都来自这些基本表。
+     * 2. 其他表引用：这些可以是视图（由查询定义的虚拟表）、派生表（查询中产生的临时表）或其他临时表。
+     *    这些表引用不直接存储数据，而是通过查询生成的数据集。计划节点涉及到这些表引用时， tblRefIds 可能不同于 tupleIds ，
+     *    因为这些表引用需要额外的查询处理步骤来生成元组。
+     */
     protected ArrayList<TupleId> tblRefIds;
 
-    // A set of nullable TupleId produced by this node. It is a subset of tupleIds.
-    // A tuple is nullable within a particular plan tree if it's the "nullable" side of
-    // an outer join, which has nothing to do with the schema.
+    // 由此节点生成的可为空的TupleId集合。这是tupleIds的子集。
+    // 元组在特定计划树中是可空的，如果它是外连接的“可空”端，这与模式无关。
     protected Set<TupleId> nullableTupleIds = Sets.newHashSet();
 
-    protected List<Expr> conjuncts = Lists.newArrayList();
+    protected List<Expr> conjuncts = Lists.newArrayList(); // 连接子集列表
 
-    // Conjuncts used to filter the original load file.
-    // In the load execution plan, the difference between "preFilterConjuncts" and "conjuncts" is that
-    // conjuncts are used to filter the data after column conversion and mapping,
-    // while fileFilterConjuncts directly filter the content read from the source data.
-    // That is, the data processing flow is:
-    //
-    //  1. Read data from source.
-    //  2. Filter data by using "preFilterConjuncts".
-    //  3. Do column mapping and transforming.
-    //  4. Filter data by using "conjuncts".
+
+    /*
+       用于过滤原始加载文件的连接子集。
+       在加载执行计划中，“preFilterConjuncts”和“conjuncts”的区别在于
+       conjuncts用于在列转换和映射后过滤数据，而fileFilterConjuncts直接过滤从源数据读取的内容。
+       即，数据处理流程如下：
+        1. 从源读取数据。
+        2. 使用“preFilterConjuncts”过滤数据。
+        3. 进行列映射和转换。
+        4. 使用“conjuncts”过滤数据。
+
+       列转换是对数据列进行转换操作，使其符合目标表的要求。
+       列映射是将源数据的列与目标表的列进行匹配或对应。
+       preFilterConjuncts 用于在列转换和映射之前对原始数据进行初步过滤，减少后续处理负担。
+       conjuncts 用于在列转换和映射之后对数据进行最终过滤，确保数据符合加载或查询要求。
+     */
     protected List<Expr> preFilterConjuncts = Lists.newArrayList();
 
     protected Expr vpreFilterConjunct = null;
 
-    // Fragment that this PlanNode is executed in. Valid only after this PlanNode has been
-    // assigned to a fragment. Set and maintained by enclosing PlanFragment.
+    // 此PlanNode在执行的片段。仅在此PlanNode已分配给片段后有效。
+    // 由包含的PlanFragment设置和维护。
     protected PlanFragment fragment;
 
-    // estimate of the output cardinality of this node; set in computeStats();
-    // invalid: -1
+    // 此节点的输出基数估计值；在computeStats()中设置；
+    // 无效：-1
     protected long cardinality;
 
-    protected long cardinalityAfterFilter = -1;
+    protected long cardinalityAfterFilter = -1; // 过滤后的基数
 
-    // number of nodes on which the plan tree rooted at this node would execute;
-    // set in computeStats(); invalid: -1
+    // 此节点根的计划树在其上执行的节点数；
+    // 在computeStats()中设置；无效：-1
     protected int numNodes;
 
-    // sum of tupleIds' avgSerializedSizes; set in computeStats()
+    // tupleIds的avgSerializedSizes总和；在computeStats()中设置
     protected float avgRowSize;
 
-    //  Node should compact data.
+    // 节点应压缩数据。
     protected boolean compactData;
-    // Most of the plan node has the same numInstance as its (left) child, except some special nodes, such as
-    // 1. scan node, whose numInstance is calculated according to its data distribution
-    // 2. exchange node, which is gather distribution
-    // 3. union node, whose numInstance is the sum of its children's numInstance
+
+    // 大多数计划节点的numInstance与其（左）子节点相同，除非一些特殊节点，如：
+    // 1. 扫描节点，其numInstance根据其数据分布计算
+    // 2. 交换节点，这是汇聚分布
+    // 3. 联合节点，其numInstance是其子节点的numInstance之和
     // ...
-    // only special nodes need to call setNumInstances() and getNumInstances() from attribute numInstances
+    // 只有特殊节点需要调用setNumInstances()和getNumInstances()从属性numInstances获取
     protected int numInstances;
 
-    // Runtime filters assigned to this node.
+    // 分配给此节点的运行时过滤器。
     protected List<RuntimeFilter> runtimeFilters = new ArrayList<>();
 
-    protected List<SlotId> outputSlotIds;
+    protected List<SlotId> outputSlotIds; // 输出槽ID列表
 
-    protected StatisticalType statisticalType = StatisticalType.DEFAULT;
-    protected StatsDeriveResult statsDeriveResult;
+    protected StatisticalType statisticalType = StatisticalType.DEFAULT; // 统计类型
+    protected StatsDeriveResult statsDeriveResult; // 统计派生结果
 
-    protected TupleDescriptor outputTupleDesc;
+    protected TupleDescriptor outputTupleDesc; // 输出元组描述
 
-    protected List<Expr> projectList;
 
-    protected int nereidsId = -1;
+    protected List<Expr> projectList; // 投影列表
 
-    private List<List<Expr>> childrenDistributeExprLists = new ArrayList<>();
-    private List<TupleDescriptor> intermediateOutputTupleDescList = Lists.newArrayList();
-    private List<List<Expr>> intermediateProjectListList = Lists.newArrayList();
+    protected int nereidsId = -1; // nereidsId
 
-    protected PlanNode(PlanNodeId id, ArrayList<TupleId> tupleIds, String planNodeName,
-            StatisticalType statisticalType) {
+    private List<List<Expr>> childrenDistributeExprLists = new ArrayList<>(); // 子节点分布表达式列表
+    private List<TupleDescriptor> intermediateOutputTupleDescList = Lists.newArrayList(); // 中间输出元组描述列表
+    private List<List<Expr>> intermediateProjectListList = Lists.newArrayList(); // 中间投影列表
+
+    protected PlanNode(PlanNodeId id, ArrayList<TupleId> tupleIds, String planNodeName, StatisticalType statisticalType) {
         this.id = id;
         this.limit = -1;
         this.offset = 0;
-        // make a copy, just to be on the safe side
+        // 复制一份，以防万一
         this.tupleIds = Lists.newArrayList(tupleIds);
         this.tblRefIds = Lists.newArrayList(tupleIds);
         this.cardinality = -1;
@@ -185,7 +200,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Copy ctor. Also passes in new id.
+     * 复制构造函数。也传递新id。
      */
     protected PlanNode(PlanNodeId id, PlanNode node, String planNodeName, StatisticalType statisticalType) {
         this.id = id;
@@ -219,15 +234,15 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Sets tblRefIds_, tupleIds_, and nullableTupleIds_.
-     * The default implementation is a no-op.
+     * 设置tblRefIds_、tupleIds_和nullableTupleIds_。
+     * 默认实现不执行任何操作。
      */
     public void computeTupleIds() {
         Preconditions.checkState(children.isEmpty() || !tupleIds.isEmpty());
     }
 
     /**
-     * Clears tblRefIds_, tupleIds_, and nullableTupleIds_.
+     * 清除tblRefIds_、tupleIds_和nullableTupleIds_。
      */
     protected void clearTupleIds() {
         tblRefIds.clear();
@@ -281,10 +296,9 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Set the limit to the given limit only if the limit hasn't been set, or the new limit
-     * is lower.
+     * 仅在未设置限制或新限制较低时，将限制设置为给定限制。
      *
-     * @param limit
+     * @param limit 新的限制值
      */
     public void setLimit(long limit) {
         if (this.limit == -1 || (limit != -1 && this.limit > limit)) {
@@ -306,7 +320,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Used by new optimizer only.
+     * 仅供新优化器使用。
      */
     public void setOffSetDirectly(long offset) {
         this.offset = offset;
@@ -345,7 +359,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Set the value of compactData in all children.
+     * 设置所有子节点的compactData值。
      */
     public void setCompactData(boolean on) {
         this.compactData = on;
@@ -420,8 +434,8 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
             List<Expr> newTargetConjuncts = Lists.newArrayList();
             for (int i = 0; i < targetConjuncts.size(); i += 2) {
                 Expr expr = i + 1 < targetConjuncts.size()
-                        ? new CompoundPredicate(CompoundPredicate.Operator.AND, targetConjuncts.get(i),
-                        targetConjuncts.get(i + 1)) : targetConjuncts.get(i);
+                    ? new CompoundPredicate(CompoundPredicate.Operator.AND, targetConjuncts.get(i),
+                    targetConjuncts.get(i + 1)) : targetConjuncts.get(i);
                 newTargetConjuncts.add(expr);
             }
             targetConjuncts = newTargetConjuncts;
@@ -485,7 +499,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Call computeStatAndMemLayout() for all materialized tuples.
+     * 调用computeStatAndMemLayout()以获取所有物化的元组。
      */
     protected void computeTupleStatAndMemLayout(Analyzer analyzer) {
         for (TupleId id : tupleIds) {
@@ -498,8 +512,8 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Generate the explain plan tree. The plan will be in the form of:
-     * <p/>
+     * 生成解释计划树。计划的形式如下：
+     *
      * root
      * |
      * |----child 2
@@ -509,17 +523,13 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
      * |      limit:2
      * |
      * child 1
-     * <p/>
-     * The root node header line will be prefixed by rootPrefix and the remaining plan
-     * output will be prefixed by prefix.
+     *
+     * 根节点头行将由rootPrefix前缀，其余计划输出将由prefix前缀。
      */
     protected final String getExplainString(String rootPrefix, String prefix, TExplainLevel detailLevel) {
         StringBuilder expBuilder = new StringBuilder();
         String detailPrefix = prefix;
-        boolean traverseChildren = children != null
-                && children.size() > 0
-                && !(this instanceof ExchangeNode);
-        // if (children != null && children.size() > 0) {
+        boolean traverseChildren = children != null && children.size() > 0 && !(this instanceof ExchangeNode);
         if (traverseChildren) {
             detailPrefix += "|  ";
         } else {
@@ -542,15 +552,15 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
             expBuilder.append(detailPrefix).append("final projections: ")
                 .append(getExplainString(projectList)).append("\n");
             expBuilder.append(detailPrefix).append("final project output tuple id: ")
-                    .append(outputTupleDesc.getId().asInt()).append("\n");
+                .append(outputTupleDesc.getId().asInt()).append("\n");
         }
         if (!intermediateProjectListList.isEmpty()) {
             int layers = intermediateProjectListList.size();
             for (int i = layers - 1; i >= 0; i--) {
                 expBuilder.append(detailPrefix).append("intermediate projections: ")
-                        .append(getExplainString(intermediateProjectListList.get(i))).append("\n");
+                    .append(getExplainString(intermediateProjectListList.get(i))).append("\n");
                 expBuilder.append(detailPrefix).append("intermediate tuple id: ")
-                        .append(intermediateOutputTupleDescList.get(i).getId().asInt()).append("\n");
+                    .append(intermediateOutputTupleDescList.get(i).getId().asInt()).append("\n");
             }
         }
         if (!CollectionUtils.isEmpty(childrenDistributeExprLists)) {
@@ -559,7 +569,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
                     .append(getExplainString(distributeExprList)).append("\n");
             }
         }
-        // Output Tuple Ids only when explain plan level is set to verbose
+        // 仅在解释计划级别设置为详细时输出元组ID
         if (detailLevel.equals(TExplainLevel.VERBOSE)) {
             expBuilder.append(detailPrefix + "tuple ids: ");
             for (TupleId tupleId : tupleIds) {
@@ -569,16 +579,15 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
             expBuilder.append("\n");
         }
 
-        // Print the children
-        // if (children != null && children.size() > 0) {
+        // 打印子节点
         if (traverseChildren) {
             expBuilder.append(detailPrefix + "\n");
             String childHeadlinePrefix = prefix + "|----";
             String childDetailPrefix = prefix + "|    ";
             for (int i = 1; i < children.size(); ++i) {
                 expBuilder.append(
-                        children.get(i).getExplainString(childHeadlinePrefix, childDetailPrefix,
-                                detailLevel));
+                    children.get(i).getExplainString(childHeadlinePrefix, childDetailPrefix,
+                        detailLevel));
                 expBuilder.append(childDetailPrefix + "\n");
             }
             expBuilder.append(children.get(0).getExplainString(prefix, prefix, detailLevel));
@@ -595,7 +604,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         if (!CollectionUtils.isEmpty(projectList)) {
             expBuilder.append(prefix).append("projections: ").append(getExplainString(projectList)).append("\n");
             expBuilder.append(prefix).append("project output tuple id: ")
-                    .append(outputTupleDesc.getId().asInt()).append("\n");
+                .append(outputTupleDesc.getId().asInt()).append("\n");
         }
         return expBuilder.toString();
     }
@@ -608,22 +617,22 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Return the node-specific details.
-     * Subclass should override this function.
-     * Each line should be prefix by detailPrefix.
+     * 返回节点特定的详细信息。
+     * 子类应覆盖此方法。
+     * 每行应以detailPrefix为前缀。
      */
     public String getNodeExplainString(String prefix, TExplainLevel detailLevel) {
         return "";
     }
 
-    // Convert this plan node, including all children, to its Thrift representation.
+    // 将此计划节点（包括所有子节点）转换为其Thrift表示。
     public TPlan treeToThrift() {
         TPlan result = new TPlan();
         treeToThriftHelper(result);
         return result;
     }
 
-    // Append a flattened version of this plan node, including all children, to 'container'.
+    // 将此计划节点（包括所有子节点）的扁平版本附加到'container'。
     private void treeToThriftHelper(TPlan container) {
         TPlanNode msg = new TPlanNode();
         msg.node_id = id.asInt();
@@ -640,7 +649,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
             }
         }
 
-        // Serialize any runtime filters
+        // 序列化任何运行时过滤器
         for (RuntimeFilter filter : runtimeFilters) {
             msg.addToRuntimeFilters(filter.toThrift());
         }
@@ -662,7 +671,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         toThrift(msg);
         container.addToNodes(msg);
 
-        // legacy planner set outputTuple and projections inside join node
+        // 旧规划器在连接节点内设置输出元组和投影
         if (!(this instanceof JoinNodeBase) || !(((JoinNodeBase) this).isUseSpecificProjections())) {
             if (outputTupleDesc != null) {
                 msg.setOutputTupleId(outputTupleDesc.getId().asInt());
@@ -676,14 +685,14 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
 
         if (!intermediateOutputTupleDescList.isEmpty()) {
             intermediateOutputTupleDescList
-                    .forEach(
-                            tupleDescriptor -> msg.addToIntermediateOutputTupleIdList(tupleDescriptor.getId().asInt()));
+                .forEach(
+                    tupleDescriptor -> msg.addToIntermediateOutputTupleIdList(tupleDescriptor.getId().asInt()));
         }
 
         if (!intermediateProjectListList.isEmpty()) {
             intermediateProjectListList.forEach(
-                    projectList -> msg.addToIntermediateProjectionsList(
-                            projectList.stream().map(expr -> expr.treeToThrift()).collect(Collectors.toList())));
+                projectList -> msg.addToIntermediateProjectionsList(
+                    projectList.stream().map(expr -> expr.treeToThrift()).collect(Collectors.toList())));
         }
 
         if (this instanceof ExchangeNode) {
@@ -698,9 +707,9 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Computes internal state, including planner-relevant statistics.
-     * Call this once on the root of the plan tree before calling toThrift().
-     * Subclasses need to override this.
+     * 计算内部状态，包括规划器相关统计信息。
+     * 在调用toThrift()之前，在计划树的根上调用此方法一次。
+     * 子类需要覆盖此方法。
      */
     public void finalize(Analyzer analyzer) throws UserException {
         for (Expr expr : conjuncts) {
@@ -729,12 +738,10 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Computes planner statistics: avgRowSize.
-     * Subclasses need to override this.
-     * Assumes that it has already been called on all children.
-     * This is broken out of finalize() so that it can be called separately
-     * from finalize() (to facilitate inserting additional nodes during plan
-     * partitioning w/o the need to call finalize() recursively on the whole tree again).
+     * 计算规划器统计信息：avgRowSize。
+     * 子类需要覆盖此方法。
+     * 假设已经在所有子节点上调用了此方法。
+     * 这是从finalize()中分离出来的，因此可以单独调用（以便在计划分区期间插入其他节点，而无需再次递归地调用整个树的finalize()）。
      */
     protected void computeStats(Analyzer analyzer) throws UserException {
         avgRowSize = 0.0F;
@@ -745,12 +752,11 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * This function will calculate the cardinality when the old join reorder algorithm is enabled.
-     * This value is used to determine the distributed way(broadcast of shuffle) of join in the distributed planning.
+     * 此函数在启用旧连接重排序算法时计算基数。
+     * 此值用于在分布式规划中确定连接的分布方式（广播或洗牌）。
      *
-     * If the new join reorder and the old join reorder have the same cardinality calculation method,
-     *   also the calculation is completed in the init(),
-     *   there is no need to override this function.
+     * 如果新连接重排序和旧连接重排序具有相同的基数计算方法，并且计算已在init()中完成，
+     * 则无需覆盖此函数。
      */
     protected void computeOldCardinality() {
     }
@@ -763,10 +769,8 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
 
     protected ExprSubstitutionMap outputSmap;
 
-    // global state of planning wrt conjunct assignment; used by planner as a shortcut
-    // to avoid having to pass assigned conjuncts back and forth
-    // (the planner uses this to save and reset the global state in between join tree
-    // alternatives)
+    // 关于连接子集分配的全局状态；由规划器用作快捷方式，避免在连接树替代之间来回传递分配的连接子集
+    // （规划器使用此功能保存和重置全局状态）。
     protected Set<ExprId> assignedConjuncts;
 
     protected ExprSubstitutionMap withoutTupleIsNullOutputSmap;
@@ -795,10 +799,9 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Assign remaining unassigned conjuncts.
+     * 分配剩余的未分配连接子集。
      */
     protected void assignConjuncts(Analyzer analyzer) {
-        // we cannot plan conjuncts on exchange node, so we just skip the node.
         if (this instanceof ExchangeNode) {
             return;
         }
@@ -810,7 +813,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Returns an smap that combines the children's smaps.
+     * 返回组合子节点smap的结果。
      */
     protected ExprSubstitutionMap getCombinedChildSmap() {
         if (getChildren().size() == 0) {
@@ -822,7 +825,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         }
 
         ExprSubstitutionMap result = ExprSubstitutionMap.combine(
-                getChild(0).getOutputSmap(), getChild(1).getOutputSmap());
+            getChild(0).getOutputSmap(), getChild(1).getOutputSmap());
 
         for (int i = 2; i < getChildren().size(); ++i) {
             result = ExprSubstitutionMap.combine(result, getChild(i).getOutputSmap());
@@ -839,36 +842,36 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
             return getChild(0).getWithoutTupleIsNullOutputSmap();
         }
         ExprSubstitutionMap result = ExprSubstitutionMap.combine(
-                getChild(0).getWithoutTupleIsNullOutputSmap(),
-                getChild(1).getWithoutTupleIsNullOutputSmap());
+            getChild(0).getWithoutTupleIsNullOutputSmap(),
+            getChild(1).getWithoutTupleIsNullOutputSmap());
 
         for (int i = 2; i < getChildren().size(); ++i) {
             result = ExprSubstitutionMap.combine(
-                    result, getChild(i).getWithoutTupleIsNullOutputSmap());
+                result, getChild(i).getWithoutTupleIsNullOutputSmap());
         }
 
         return result;
     }
 
     /**
-     * Sets outputSmap_ to compose(existing smap, combined child smap). Also
-     * substitutes conjuncts_ using the combined child smap.
+     * 将outputSmap_设置为compose(existing smap, combined child smap)。还
+     * 使用组合的子节点smap替换conjuncts_。
      *
      * @throws AnalysisException
      */
     protected void createDefaultSmap(Analyzer analyzer) throws UserException {
         ExprSubstitutionMap combinedChildSmap = getCombinedChildSmap();
         outputSmap =
-                ExprSubstitutionMap.compose(outputSmap, combinedChildSmap, analyzer);
+            ExprSubstitutionMap.compose(outputSmap, combinedChildSmap, analyzer);
 
         conjuncts = Expr.substituteList(conjuncts, outputSmap, analyzer, false);
     }
 
     /**
-     * Appends ids of slots that need to be materialized for this tree of nodes.
-     * By default, only slots referenced by conjuncts need to be materialized
-     * (the rationale being that only conjuncts need to be evaluated explicitly;
-     * exprs that are turned into scan predicates, etc., are evaluated implicitly).
+     * 添加需要物化的槽ID以获取此节点树。
+     * 默认情况下，仅引用的槽需要物化
+     * （其理由是仅需要显式评估连接子集；
+     * 变成扫描谓词等的表达式是隐式评估的）。
      */
     public void getMaterializedIds(Analyzer analyzer, List<SlotId> ids) {
         for (PlanNode childNode : children) {
@@ -877,12 +880,10 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         Expr.getIds(getConjuncts(), null, ids);
     }
 
-    // Convert this plan node into msg (excluding children), which requires setting
-    // the node type and the node-specific field.
+    // 将此计划节点（不包括子节点）转换为msg，需要设置节点类型和节点特定字段。
     protected abstract void toThrift(TPlanNode msg);
 
     protected String debugString() {
-        // not using Objects.toStrHelper because
         StringBuilder output = new StringBuilder();
         output.append("preds=" + Expr.debugString(conjuncts));
         output.append(" limit=" + Long.toString(limit));
@@ -904,7 +905,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Returns true if stats-related variables are valid.
+     * 返回true，如果统计相关变量有效。
      */
     protected boolean hasValidStats() {
         return (numNodes == -1 || numNodes >= 0) && (cardinality == -1 || cardinality >= 0);
@@ -940,19 +941,15 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Returns the estimated combined selectivity of all conjuncts. Uses heuristics to
-     * address the following estimation challenges:
-     * 1. The individual selectivities of conjuncts may be unknown.
-     * 2. Two selectivities, whether known or unknown, could be correlated. Assuming
-     * independence can lead to significant underestimation.
-     * <p>
-     * The first issue is addressed by using a single default selectivity that is
-     * representative of all conjuncts with unknown selectivities.
-     * The second issue is addressed by an exponential backoff when multiplying each
-     * additional selectivity into the final result.
+     * 返回所有连接子集的估计组合选择性。使用启发式方法解决以下估计挑战：
+     * 1. 连接子集的个别选择性可能是未知的。
+     * 2. 两个选择性，无论是已知还是未知，都可能是相关的。假设独立性可能导致严重的低估。
+     *
+     * 第一个问题通过使用单个默认选择性来解决，该选择性代表所有未知选择性的连接子集。
+     * 第二个问题通过在最终结果中乘以每个附加选择性时的指数回退来解决。
      */
     protected static double computeCombinedSelectivity(List<Expr> conjuncts) {
-        // Collect all estimated selectivities.
+        // 收集所有估计的选择性。
         List<Double> selectivities = new ArrayList<>();
         for (Expr e : conjuncts) {
             if (e.hasSelectivity()) {
@@ -960,21 +957,18 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
             }
         }
         if (selectivities.size() != conjuncts.size()) {
-            // Some conjuncts have no estimated selectivity. Use a single default
-            // representative selectivity for all those conjuncts.
+            // 某些连接子集没有估计的选择性。使用单个默认代表选择性表示所有这些连接子集。
             selectivities.add(Expr.DEFAULT_SELECTIVITY);
         }
-        // Sort the selectivities to get a consistent estimate, regardless of the original
-        // conjunct order. Sort in ascending order such that the most selective conjunct
-        // is fully applied.
+        // 对选择性进行排序以获得一致的估计，不论原始连接子集顺序如何。按升序排序，使得最具选择性的连接子集被完全应用。
         Collections.sort(selectivities);
         double result = 1.0;
         // selectivity = 1 * (s1)^(1/1) * (s2)^(1/2) * ... * (sn-1)^(1/(n-1)) * (sn)^(1/n)
         for (int i = 0; i < selectivities.size(); ++i) {
-            // Exponential backoff for each selectivity multiplied into the final result.
+            // 乘入最终结果中的每个选择性的指数回退。
             result *= Math.pow(selectivities.get(i), 1.0 / (double) (i + 1));
         }
-        // Bound result in [0, 1]
+        // 将结果限制在[0, 1]范围内
         return Math.max(0.0, Math.min(1.0, result));
     }
 
@@ -986,8 +980,8 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Compute the product of the selectivity of all conjuncts.
-     * This function is used for old cardinality in finalize()
+     * 计算所有连接子集的选择性的乘积。
+     * 此函数用于finalize()中的旧基数
      */
     protected double computeOldSelectivity() {
         double prod = 1.0;
@@ -1000,7 +994,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         return prod;
     }
 
-    // Compute the cardinality after applying conjuncts based on 'preConjunctCardinality'.
+    // 根据'preConjunctCardinality'计算应用连接子集后的基数。
     protected void applyConjunctsSelectivity() {
         if (cardinality == -1) {
             return;
@@ -1008,21 +1002,20 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         applySelectivity();
     }
 
-    // Compute the cardinality after applying conjuncts with 'selectivity', based on
-    // 'preConjunctCardinality'.
+    // 根据'preConjunctCardinality'计算应用连接子集后的基数，带有'selectivity'。
     private void applySelectivity() {
         double selectivity = computeSelectivity();
         Preconditions.checkState(cardinality >= 0);
         double preConjunctCardinality = cardinality;
         cardinality = Math.round(cardinality * selectivity);
-        // don't round cardinality down to zero for safety.
+        // 不要将基数四舍五入为零以确保安全。
         if (cardinality == 0 && preConjunctCardinality > 0) {
             cardinality = 1;
         }
     }
 
     /**
-     * find planNode recursively based on the planNodeId
+     * 基于planNodeId递归地查找planNode
      */
     public static PlanNode findPlanNodeFromPlanNodeId(PlanNode root, PlanNodeId id) {
         if (root == null || root.getId() == null || id == null) {
@@ -1123,28 +1116,27 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * If an plan node implements this method, the plan node itself supports project optimization.
-     * @param requiredSlotIdSet: The upper plan node's requirement slot set for the current plan node.
-     *                        The requiredSlotIdSet could be null when the upper plan node cannot
-     *                         calculate the required slot.
-     * @param analyzer
-     * @throws NotImplementedException
+     * 如果计划节点实现此方法，则计划节点本身支持投影优化。
+     * @param requiredSlotIdSet: 当前计划节点的上层计划节点的要求槽集合。
+     *                        当上层计划节点无法计算要求槽时，requiredSlotIdSet可能为空。
+     * @param analyzer 分析器
+     * @throws NotImplementedException 未实现异常
      *
-     * For example:
-     * Query: select a.k1 from a, b where a.k1=b.k1
-     * PlanNodeTree:
-     *     output exprs: a.k1
+     * 例如：
+     * 查询：select a.k1 from a, b where a.k1=b.k1
+     * 计划节点树：
+     *     输出表达式：a.k1
      *           |
-     *     hash join node
-     *   (input slots: a.k1, b.k1)
+     *     哈希连接节点
+     *   （输入槽：a.k1, b.k1）
      *        |      |
-     *  scan a(k1)   scan b(k1)
+     *  扫描a(k1)   扫描b(k1)
      *
-     * Function params: requiredSlotIdSet = a.k1
-     * After function:
-     *     hash join node
-     *   (output slots: a.k1)
-     *   (input slots: a.k1, b.k1)
+     * 函数参数：requiredSlotIdSet = a.k1
+     * 函数之后：
+     *     哈希连接节点
+     *   （输出槽：a.k1）
+     *   （输入槽：a.k1, b.k1）
      */
     public void initOutputSlotIds(Set<SlotId> requiredSlotIdSet, Analyzer analyzer) throws NotImplementedException {
         throw new NotImplementedException("The `initOutputSlotIds` hasn't been implemented in " + planNodeName);
@@ -1152,27 +1144,25 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
 
     public void projectOutputTuple() throws NotImplementedException {
         throw new NotImplementedException("The `projectOutputTuple` hasn't been implemented in " + planNodeName + ". "
-        + "But it does not affect the project optimizer");
+            + "But it does not affect the project optimizer");
     }
 
     /**
-     * If an plan node implements this method, its child plan node has the ability to implement the project.
-     * The return value of this method will be used as
-     *     the input(requiredSlotIdSet) of child plan node method initOutputSlotIds.
-     * That is to say, only when the plan node implements this method,
-     *     its children can realize project optimization.
+     * 如果计划节点实现此方法，则其子计划节点能够实现投影。
+     * 此方法的返回值将用作子计划节点方法initOutputSlotIds的输入(requiredSlotIdSet)。
+     * 即，仅当计划节点实现此方法时，其子节点才能实现投影优化。
      *
-     * @return The requiredSlotIdSet of this plan node
-     * @throws NotImplementedException
-     * PlanNodeTree:
-     *         agg node(group by a.k1)
+     * @return 计划节点的requiredSlotIdSet
+     * @throws NotImplementedException 未实现异常
+     * 计划节点树：
+     *         聚合节点（按a.k1分组）
      *           |
-     *     hash join node(a.k1=b.k1)
+     *     哈希连接节点（a.k1=b.k1）
      *        |      |
-     *  scan a(k1)   scan b(k1)
-     * After function:
-     *         agg node
-     *    (required slots: a.k1)
+     *  扫描a(k1)   扫描b(k1)
+     * 函数之后：
+     *         聚合节点
+     *    （所需槽：a.k1）
      */
     public Set<SlotId> computeInputSlotIds(Analyzer analyzer) throws NotImplementedException {
         throw new NotImplementedException("The `computeInputSlotIds` hasn't been implemented in " + planNodeName);
@@ -1188,7 +1178,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     }
 
     /**
-     * Supplement the information be needed for nodes generated by the new optimizer.
+     * 为新优化器生成的节点补充所需信息。
      */
     public void finalizeForNereids() throws UserException {
 
