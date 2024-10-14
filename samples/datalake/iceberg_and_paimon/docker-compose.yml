@@ -20,6 +20,7 @@ version: "3"
 services:
   spark:
     image: tabulario/spark-iceberg
+    platform: linux/arm64
     container_name: doris-iceberg-paimon-spark
     hostname: demo-spark-iceberg
     build: spark/
@@ -41,6 +42,7 @@ services:
 
   rest:
     image: tabulario/iceberg-rest
+    platform: linux/arm64
     container_name: doris-iceberg-paimon-iceberg-rest
     ports:
       - ${REST_CATALOG_PORT}:8181
@@ -60,6 +62,7 @@ services:
 
   minio:
     image: minio/minio
+    platform: linux/arm64
     container_name: doris-iceberg-paimon-minio
     ports:
       - ${MINIO_API_PORT}:9000
@@ -77,7 +80,8 @@ services:
   mc:
     depends_on:
       - minio
-    image: minio/mc
+    image: minio/mc:RELEASE.2024-10-02T08-27-28Z-cpuv1
+    platform: linux/arm64
     container_name: doris-iceberg-paimon-mc
     environment:
       - AWS_ACCESS_KEY_ID=admin
@@ -96,6 +100,7 @@ services:
 
   jobmanager:
     image: flink:1.18.0
+    platform: linux/arm64
     container_name: doris-iceberg-paimon-jobmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=jobmanager
@@ -125,6 +130,7 @@ services:
 
   taskmanager:
     image: flink:1.18.0
+    platform: linux/arm64
     environment:
       - JOB_MANAGER_RPC_ADDRESS=jobmanager
       - AWS_ACCESS_KEY_ID=admin
@@ -145,9 +151,10 @@ services:
       - demo-iceberg
     deploy:
       replicas: 2
-  
+
   doris:
-    image: mysql:8.0.18
+    image: mysql:8.0.30
+    platform: linux/arm64
     container_name: doris-iceberg-paimon-doris
     networks:
       - demo-iceberg
@@ -160,12 +167,13 @@ services:
       - AWS_REGION=us-east-1
       - LD_LIBRARY_PATH=/opt/doris/be/lib
       - JAVA_HOME=/opt/jdk8
+      - bootstrap.system_call_filter=false
     volumes:
-      - ./packages/jdk1.8.0_202:/opt/jdk8
+      - ./packages/jdk-8u421-macosx-aarch64:/opt/jdk8  # 更新JDK路径
       - ./packages/doris-bin:/opt/doris-bin
       - ./sql/init_doris.sql:/opt/doris-bin/init_doris.sql
       - ./scripts:/opt/scripts
-    command: bin/bash /opt/scripts/start_doris.sh
+    command: /bin/bash -c "microdnf install util-linux vim procps-ng && /opt/scripts/start_doris.sh"
 
 networks:
   demo-iceberg:
