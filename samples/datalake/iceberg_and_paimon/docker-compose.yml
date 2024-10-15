@@ -56,7 +56,7 @@ services:
     networks:
       - demo-iceberg
     volumes:
-      - './packages/jdk1.8.0_202:/opt/jdk1.8.0_202'
+      - './packages/jdk1.8.0_421:/opt/jdk1.8.0_421'
       - './packages/doris-bin:/opt/doris-bin'
       - './scripts:/opt/scripts'
 
@@ -168,12 +168,13 @@ services:
       - LD_LIBRARY_PATH=/opt/doris/be/lib
       - JAVA_HOME=/opt/jdk8
       - bootstrap.system_call_filter=false
+      - DISABLE_SWAP=true
     volumes:
-      - ./packages/jdk-8u421-macosx-aarch64:/opt/jdk8  # 更新JDK路径
+      - ./packages/jdk1.8.0_421:/opt/jdk8  # 更新JDK路径
       - ./packages/doris-bin:/opt/doris-bin
       - ./sql/init_doris.sql:/opt/doris-bin/init_doris.sql
       - ./scripts:/opt/scripts
-    command: /bin/bash -c "microdnf install util-linux vim procps-ng && /opt/scripts/start_doris.sh"
+    command: /bin/bash -c "microdnf install util-linux vim procps-ng && chmod +x /opt/scripts/start_doris.sh && /opt/scripts/start_doris.sh"
 
 networks:
   demo-iceberg:

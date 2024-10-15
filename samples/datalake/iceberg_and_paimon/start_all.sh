@@ -20,7 +20,7 @@
 set -e
 
 DORIS_PACKAGE=apache-doris-2.1.5-bin-arm64
-DORIS_DOWNLOAD_URL=https://apache-doris-releases.oss-accelerate.aliyuncs.com
+#DORIS_DOWNLOAD_URL=https://apache-doris-releases.oss-accelerate.aliyuncs.com
 
 download_source_file() {
     local FILE_PATH="$1"
@@ -55,8 +55,8 @@ if [[ ! -d "packages" ]]; then
 fi
 cd packages || exit
 
-download_source_file "${DORIS_PACKAGE}.tar.gz" "0af6706854cedff46ee2210bd949e2e9" "${DORIS_DOWNLOAD_URL}"
-download_source_file "jdk-8u421-macosx-aarch64.tar.gz" "3b6a6468febebf8dfb3480c22a3e11a4" "https://download.oracle.com/otn/java/jdk/8u421-b11/jdk-8u421-macosx-aarch64.tar.gz"
+#download_source_file "${DORIS_PACKAGE}.tar.gz" "0af6706854cedff46ee2210bd949e2e9" "${DORIS_DOWNLOAD_URL}"
+#download_source_file "jdk-8u421-macosx-aarch64.tar.gz" "3b6a6468febebf8dfb3480c22a3e11a4" "https://download.oracle.com/otn/java/jdk/8u421-b11/jdk-8u421-macosx-aarch64.tar.gz"
 download_source_file "iceberg-aws-bundle-1.5.2.jar" "7087ac697254f8067d0f813521542263" "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/1.5.2"
 download_source_file "iceberg-flink-runtime-1.18-1.5.2.jar" "8e895288e6770eea69ea05ffbc918c1b" "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-flink-runtime-1.18/1.5.2"
 download_source_file "flink-connector-jdbc-3.1.2-1.18.jar" "5c99b637721dd339e10725b81ccedb60" "https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc/3.1.2-1.18"
@@ -66,15 +66,25 @@ download_source_file "paimon-spark-3.5-0.8.0.jar" "963d0c17d69034ecf77816f64863f
 download_source_file "flink-shaded-hadoop-2-uber-2.8.3-10.0.jar" "f6f0be5b9cbebfd43e38121b209f4ecc" "https://repo1.maven.org/maven2/org/apache/flink/flink-shaded-hadoop-2-uber/2.8.3-10.0"
 download_source_file "flink-s3-fs-hadoop-1.18.0.jar" "60b75e0fdc5ed05f1213b593c4b66556" "https://repo1.maven.org/maven2/org/apache/flink/flink-s3-fs-hadoop/1.18.0"
 
-if [[ ! -f "jdk1.8.0_421.jdk/SUCCESS" ]]; then
+if [[ ! -f "jdk1.8.0_421/SUCCESS" ]]; then
     echo "Prepare jdk8 environment"
-    if [[ -d "jdk1.8.0_421.jdk" ]]; then
-        echo "Remove broken jdk1.8.0_421.jdk"
-        rm -rf jdk1.8.0_421.jdk
+    if [[ -d "jdk1.8.0_421" ]]; then
+        echo "Remove broken jdk1.8.0_421"
+        rm -rf jdk1.8.0_421
     fi
-    echo "Unpackage jdk1.8.0_421.jdk"
-    tar xzf jdk-8u421-macosx-aarch64.tar.gz
-    touch jdk1.8.0_421.jdk/SUCCESS
+    echo "Unpackage jdk1.8.0_421"
+
+    # 解压新的 jdk-8u421-linux-aarch64.tar.gz 文件
+    tar xzf jdk-8u421-linux-aarch64.tar.gz
+
+    # 检查解压是否成功
+    if [[ -d "jdk1.8.0_421" ]]; then
+        echo "JDK unpacked successfully"
+        touch jdk1.8.0_421/SUCCESS
+    else
+        echo "Failed to unpack JDK" >&2
+        exit 1
+    fi
 fi
 
 
