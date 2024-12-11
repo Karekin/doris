@@ -101,6 +101,9 @@ public:
         return Status::OK();
     }
 
+    // Operators need to be executed serially. (e.g. finalized agg without key)
+    [[nodiscard]] virtual bool is_serial_operator() const { return _is_serial_operator; }
+
     [[nodiscard]] bool is_closed() const { return _is_closed; }
 
     virtual size_t revocable_mem_size(RuntimeState* state) const { return 0; }
@@ -108,17 +111,22 @@ public:
     virtual Status revoke_memory(RuntimeState* state) { return Status::OK(); }
     [[nodiscard]] virtual bool require_data_distribution() const { return false; }
     OperatorPtr child() { return _child; }
-    [[nodiscard]] bool followed_by_shuffled_join() const { return _followed_by_shuffled_join; }
-    void set_followed_by_shuffled_join(bool followed_by_shuffled_join) {
-        _followed_by_shuffled_join = followed_by_shuffled_join;
+    [[nodiscard]] bool followed_by_shuffled_operator() const {
+        return _followed_by_shuffled_operator;
     }
-    [[nodiscard]] virtual bool require_shuffled_data_distribution() const { return false; }
+    void set_followed_by_shuffled_operator(bool followed_by_shuffled_operator) {
+        _followed_by_shuffled_operator = followed_by_shuffled_operator;
+    }
+    [[nodiscard]] virtual bool is_shuffled_operator() const { return false; }
+    [[nodiscard]] virtual DataDistribution required_data_distribution() const;
+    [[nodiscard]] virtual bool require_shuffled_data_distribution() const;
 
 protected:
     OperatorPtr _child = nullptr;
 
     bool _is_closed;
-    bool _followed_by_shuffled_join = false;
+    bool _followed_by_shuffled_operator = false;
+    bool _is_serial_operator = false;
 };
 
 class PipelineXLocalStateBase {
@@ -155,10 +163,8 @@ public:
     void reached_limit(vectorized::Block* block, bool* eos);
     RuntimeProfile* profile() { return _runtime_profile.get(); }
 
-    MemTracker* mem_tracker() { return _mem_tracker.get(); }
-    RuntimeProfile::Counter* rows_returned_counter() { return _rows_returned_counter; }
-    RuntimeProfile::Counter* blocks_returned_counter() { return _blocks_returned_counter; }
     RuntimeProfile::Counter* exec_time_counter() { return _exec_timer; }
+    RuntimeProfile::Counter* memory_used_counter() { return _memory_used_counter; }
     OperatorXBase* parent() { return _parent; }
     RuntimeState* state() { return _state; }
     vectorized::VExprContextSPtrs& conjuncts() { return _conjuncts; }
@@ -180,26 +186,23 @@ public:
 
 protected:
     friend class OperatorXBase;
+    template <typename LocalStateType>
+    friend class ScanOperatorX;
 
     ObjectPool* _pool = nullptr;
     int64_t _num_rows_returned {0};
 
     std::unique_ptr<RuntimeProfile> _runtime_profile;
 
-    // Record this node memory size. it is expected that artificial guarantees are accurate,
-    // which will providea reference for operator memory.
-    std::unique_ptr<MemTracker> _mem_tracker;
-
     std::shared_ptr<QueryStatistics> _query_statistics = nullptr;
 
     RuntimeProfile::Counter* _rows_returned_counter = nullptr;
     RuntimeProfile::Counter* _blocks_returned_counter = nullptr;
     RuntimeProfile::Counter* _wait_for_dependency_timer = nullptr;
-    RuntimeProfile::Counter* _memory_used_counter = nullptr;
+    // Account for current memory and peak memory used by this node
+    RuntimeProfile::HighWaterMarkCounter* _memory_used_counter = nullptr;
     RuntimeProfile::Counter* _projection_timer = nullptr;
     RuntimeProfile::Counter* _exec_timer = nullptr;
-    // Account for peak memory used by this node
-    RuntimeProfile::HighWaterMarkCounter* _peak_memory_usage_counter = nullptr;
     RuntimeProfile::Counter* _init_timer = nullptr;
     RuntimeProfile::Counter* _open_timer = nullptr;
     RuntimeProfile::Counter* _close_timer = nullptr;
@@ -334,13 +337,13 @@ public:
     DataSinkOperatorXBase* parent() { return _parent; }
     RuntimeState* state() { return _state; }
     RuntimeProfile* profile() { return _profile; }
-    MemTracker* mem_tracker() { return _mem_tracker.get(); }
     [[nodiscard]] RuntimeProfile* faker_runtime_profile() const {
         return _faker_runtime_profile.get();
     }
 
     RuntimeProfile::Counter* rows_input_counter() { return _rows_input_counter; }
     RuntimeProfile::Counter* exec_time_counter() { return _exec_timer; }
+    RuntimeProfile::Counter* memory_used_counter() { return _memory_used_counter; }
     virtual std::vector<Dependency*> dependencies() const { return {nullptr}; }
 
     // override in exchange sink , AsyncWriterSink
@@ -352,7 +355,6 @@ protected:
     DataSinkOperatorXBase* _parent = nullptr;
     RuntimeState* _state = nullptr;
     RuntimeProfile* _profile = nullptr;
-    std::unique_ptr<MemTracker> _mem_tracker;
     // Set to true after close() has been called. subclasses should check and set this in
     // close().
     bool _closed = false;
@@ -371,8 +373,7 @@ protected:
     RuntimeProfile::Counter* _wait_for_dependency_timer = nullptr;
     RuntimeProfile::Counter* _wait_for_finish_dependency_timer = nullptr;
     RuntimeProfile::Counter* _exec_timer = nullptr;
-    RuntimeProfile::Counter* _memory_used_counter = nullptr;
-    RuntimeProfile::HighWaterMarkCounter* _peak_memory_usage_counter = nullptr;
+    RuntimeProfile::HighWaterMarkCounter* _memory_used_counter = nullptr;
 
     std::shared_ptr<QueryStatistics> _query_statistics = nullptr;
 };
@@ -440,7 +441,7 @@ public:
 
     Status init(const TDataSink& tsink) override;
     [[nodiscard]] virtual Status init(ExchangeType type, const int num_buckets,
-                                      const bool is_shuffled_hash_join,
+                                      const bool use_global_hash_shuffle,
                                       const std::map<int, int>& shuffle_idx_to_instance_idx) {
         return Status::InternalError("init() is only implemented in local exchange!");
     }
@@ -475,9 +476,6 @@ public:
     }
 
     [[nodiscard]] virtual std::shared_ptr<BasicSharedState> create_shared_state() const = 0;
-    [[nodiscard]] virtual DataDistribution required_data_distribution() const;
-
-    [[nodiscard]] virtual bool is_shuffled_hash_join() const { return false; }
 
     Status close(RuntimeState* state) override {
         return Status::InternalError("Should not reach here!");
@@ -489,8 +487,6 @@ public:
                                                    int indentation_level) const;
 
     [[nodiscard]] bool is_sink() const override { return true; }
-
-    [[nodiscard]] bool is_source() const override { return false; }
 
     static Status close(RuntimeState* state, Status exec_status) {
         auto result = state->get_sink_local_state_result();
@@ -513,6 +509,8 @@ public:
     [[nodiscard]] std::string get_name() const override { return _name; }
 
     virtual bool should_dry_run(RuntimeState* state) { return false; }
+
+    [[nodiscard]] virtual bool count_down_destination() { return true; }
 
 protected:
     template <typename Writer, typename Parent>
@@ -644,26 +642,12 @@ public:
         throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR, _op_name);
     }
     [[nodiscard]] std::string get_name() const override { return _op_name; }
-    [[nodiscard]] virtual DataDistribution required_data_distribution() const {
-        return _child && _child->ignore_data_distribution() && !is_source()
-                       ? DataDistribution(ExchangeType::PASSTHROUGH)
-                       : DataDistribution(ExchangeType::NOOP);
-    }
-    [[nodiscard]] virtual bool ignore_data_distribution() const {
-        return _child ? _child->ignore_data_distribution() : _ignore_data_distribution;
-    }
-    [[nodiscard]] bool ignore_data_hash_distribution() const {
-        return _child ? _child->ignore_data_hash_distribution() : _ignore_data_distribution;
-    }
     [[nodiscard]] virtual bool need_more_input_data(RuntimeState* state) const { return true; }
-    void set_ignore_data_distribution() { _ignore_data_distribution = true; }
 
     Status open(RuntimeState* state) override;
 
     [[nodiscard]] virtual Status get_block(RuntimeState* state, vectorized::Block* block,
                                            bool* eos) = 0;
-
-    [[nodiscard]] virtual bool is_shuffled_hash_join() const { return false; }
 
     Status close(RuntimeState* state) override;
 
@@ -729,8 +713,6 @@ public:
 
     bool has_output_row_desc() const { return _output_row_descriptor != nullptr; }
 
-    [[nodiscard]] bool is_source() const override { return false; }
-
     [[nodiscard]] virtual Status get_block_after_projects(RuntimeState* state,
                                                           vectorized::Block* block, bool* eos);
 
@@ -739,6 +721,9 @@ public:
                           vectorized::Block* output_block) const;
     void set_parallel_tasks(int parallel_tasks) { _parallel_tasks = parallel_tasks; }
     int parallel_tasks() const { return _parallel_tasks; }
+
+    // To keep compatibility with older FE
+    void set_serial_operator() { _is_serial_operator = true; }
 
 protected:
     template <typename Dependency>
@@ -773,7 +758,6 @@ protected:
     uint32_t _debug_point_count = 0;
 
     std::string _op_name;
-    bool _ignore_data_distribution = false;
     int _parallel_tasks = 0;
 
     //_keep_origin is used to avoid copying during projection,
@@ -844,9 +828,9 @@ public:
 
 template <typename Writer, typename Parent>
     requires(std::is_base_of_v<vectorized::AsyncResultWriter, Writer>)
-class AsyncWriterSink : public PipelineXSinkLocalState<FakeSharedState> {
+class AsyncWriterSink : public PipelineXSinkLocalState<BasicSharedState> {
 public:
-    using Base = PipelineXSinkLocalState<FakeSharedState>;
+    using Base = PipelineXSinkLocalState<BasicSharedState>;
     AsyncWriterSink(DataSinkOperatorXBase* parent, RuntimeState* state)
             : Base(parent, state), _async_writer_dependency(nullptr) {
         _finish_dependency =
